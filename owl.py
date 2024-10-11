@@ -52,29 +52,34 @@ class Owl:
         self.switch_pin = self.config.getint('Controller', 'switch_pin')
 
         if self.enable_controller:
+            # Shared values for controller states
             self.detection_state = Value('b', False)
             self.sample_state = Value('b', False)
             self.stop_flag = Value('b', False)
+            # Initialize the controller
             self.basic_controller = BasicController(detection_state=self.detection_state,
                                                     sample_state=self.sample_state,
                                                     stop_flag=self.stop_flag,
                                                     switch_board_pin=f'BOARD{self.switch_pin}',
                                                     switch_purpose=self.switch_purpose)
 
+            # Start the controller in a separate process
             self.basic_controller_process = Process(target=self.basic_controller.run)
             self.basic_controller_process.start()
 
         self.relay_vis = None
 
+        # If focus is enabled, force display to show the output
         self.focus = focus
         if self.focus:
             self.show_display = True
 
+        # Camera resolution and exposure compensation
         self.resolution = (self.config.getint('Camera', 'resolution_width'),
                            self.config.getint('Camera', 'resolution_height'))
         self.exp_compensation = self.config.getint('Camera', 'exp_compensation')
 
-        # threshold parameters for different algorithms
+        # Threshold parameters for different algorithms
         self.exgMin = self.config.getint('GreenOnBrown', 'exgMin')
         self.exgMax = self.config.getint('GreenOnBrown', 'exgMax')
         self.hueMin = self.config.getint('GreenOnBrown', 'hueMin')
@@ -85,12 +90,12 @@ class Owl:
         self.brightnessMax = self.config.getint('GreenOnBrown', 'brightnessMax')
 
         self.threshold_dict = {}
-        # time spent on each image when looping over a directory
+        # Time spent on each image when looping over a directory
         self.image_loop_time = self.config.getint('Visualisation', 'image_loop_time')
 
-        # setup the track bars if show_display is True
+        # Setup the track bars if show_display is True
         if self.show_display:
-            # create trackbars for the threshold calculation
+            # Create trackbars for the threshold calculation
             self.window_name = "Adjust Detection Thresholds"
             cv2.namedWindow("Adjust Detection Thresholds", cv2.WINDOW_AUTOSIZE)
             cv2.createTrackbar("ExG-Min", self.window_name, self.exgMin, 255, nothing)
@@ -105,36 +110,34 @@ class Owl:
         # Relay Dict maps the reference relay number to a boardpin on the embedded device
         self.relay_dict = {}
 
-        # use the [Relays] section to build the dictionary
+        # Use the [Relays] section to build the dictionary
         for key, value in self.config['Relays'].items():
             self.relay_dict[int(key)] = int(value)
 
-        # instantiate the relay controller - successful start should beep the buzzer
+        # Instantiate the relay controller - successful start should beep the buzzer
         self.relay_controller = RelayController(relay_dict=self.relay_dict)
 
-        # instantiate the logger
+        # Instantiate the logger
         self.logger = self.relay_controller.logger
 
-        # check that the resolution is not so high it will entirely brick/destroy the OWL.
+        # Check that the resolution is not too high to avoid performance issues
         total_pixels = self.resolution[0] * self.resolution[1]
         if total_pixels > (832 * 640):
-            # change here if you want to test higher resolutions, but be warned, backup your current image!
+            # Adjust resolution if it's too high
             self.resolution = (416, 320)
             self.logger.log_line(f"[WARNING] Resolution {self.config.getint('Camera', 'resolution_width')}, "
                                  f"{self.config.getint('Camera', 'resolution_height')} selected is dangerously high. ",
                                  verbose=True)
 
-        # check if test video or videostream from camera
-        # is the source a directory/file
-        if len(self.config.get('System', 'input_file_or_directory')) > 0:
-            self.input_file_or_directory = self.config.get('System', 'input_file_or_directory')
+        # Determine if the source is a directory/file
+        if self.input_file_or_directory is None or len(self.input_file_or_directory) == 0:
+            self.input_file_or_directory = self.config.get('System', 'input_file_or_directory', fallback=None)
 
-        self.input_file_or_directory = input_file_or_directory
-
-        if len(self.config.get('System', 'input_file_or_directory')) > 0 and input_file_or_directory is not None:
+        if len(self.config.get('System', 'input_file_or_directory', fallback='')) > 0 and input_file_or_directory is not None:
             print('[WARNING] two paths to image/videos provided. Defaulting to the command line flag.')
 
         if self.input_file_or_directory:
+            # Use FrameReader if input is a directory or file
             self.cam = FrameReader(path=self.input_file_or_directory,
                                    resolution=self.resolution,
                                    loop_time=self.image_loop_time)
@@ -142,9 +145,8 @@ class Owl:
 
             self.logger.log_line(f'[INFO] Using {self.cam.input_type} from {self.input_file_or_directory}...', verbose=True)
 
-        # if no video, start the camera with the provided parameters
+        # If no video, start the camera with the provided parameters
         else:
-
             try:
                 self.cam = VideoStream(resolution=self.resolution,
                                        exp_compensation=self.exp_compensation)
@@ -156,30 +158,31 @@ class Owl:
             except ModuleNotFoundError as e:
                 missing_module = str(e).split("'")[-2]
                 error_message = f"Missing required module: {missing_module}. Please install it and try again."
-
                 raise ModuleNotFoundError(error_message) from None
 
             except Exception as e:
                 error_detail = f"[CRITICAL ERROR] Stopped OWL at start: {e}"
                 self.logger.log_line(error_detail, verbose=True)
-                self.relay_controller.relay.beep(duration=1, repeats=1)
+                if self.config.getboolean('System', 'enable_audible_errors', fallback=True):
+                    self.relay_controller.relay.beep(duration=1, repeats=1)
                 time.sleep(2)
-
                 sys.exit(1)
 
         time.sleep(1.0)
 
         ### Data collection only ###
-        self.sample_images = self.config.getboolean('DataCollection', 'sample_images')
+        self.sample_images = self.config.getboolean('DataCollection', 'sample_images', fallback=False)
 
         if self.sample_images:
-            self.sample_method = self.config.get('DataCollection', 'sample_method')
-            self.disable_detection = self.config.getboolean('DataCollection', 'disable_detection')
-            self.sample_frequency = self.config.getint('DataCollection', 'sample_frequency')
-            self.enable_device_save = self.config.getboolean('DataCollection', 'enable_device_save')
-            self.save_directory = self.config.get('DataCollection', 'save_directory')
-            self.camera_name = self.config.get('DataCollection', 'camera_name')
+            # Setup data collection parameters
+            self.sample_method = self.config.get('DataCollection', 'sample_method', fallback='whole')
+            self.disable_detection = self.config.getboolean('DataCollection', 'disable_detection', fallback=False)
+            self.sample_frequency = self.config.getint('DataCollection', 'sample_frequency', fallback=60)
+            self.enable_device_save = self.config.getboolean('DataCollection', 'enable_device_save', fallback=True)
+            self.save_directory = self.config.get('DataCollection', 'save_directory', fallback='data')
+            self.camera_name = self.config.get('DataCollection', 'camera_name', fallback='camera')
 
+            # Initialize indicators and image recorder
             self.indicators = StatusIndicator(save_directory=self.save_directory)
             self.save_subdirectory = self.indicators.setup_directories(enable_device_save=self.enable_device_save)
             self.indicators.start_storage_indicator()
@@ -188,47 +191,50 @@ class Owl:
 
         ############################
 
-        # sensitivity and weed size to be added
+        # Sensitivity and weed size to be added in the future
         self.sensitivity = None
         self.lane_coords = {}
 
-        # add the total number of relays being controlled. This can be changed easily, but the relay_dict and physical relays would need
-        # to be updated too. Fairly straightforward, so an opportunity for more precise application
-        self.relay_num = self.config.getint('System', 'relay_num')
+        # Set the total number of relays being controlled
+        self.relay_num = self.config.getint('System', 'relay_num', fallback=4)
 
-        # activation region limit - once weed crosses this line, relay is activated
+        # Activation region limit - once weed crosses this line, relay is activated
         self.yAct = int(0.01 * self.frame_height)
         self.lane_width = self.frame_width / self.relay_num
 
-        # calculate lane coords and draw on frame
+        # Calculate lane coordinates for relay activation
         for i in range(self.relay_num):
             laneX = int(i * self.lane_width)
             self.lane_coords[i] = laneX
 
     def hoot(self):
-        algorithm = self.config.get('System', 'algorithm')
-        log_fps = self.config.getboolean('DataCollection', 'log_fps')
+        # Read algorithm and logging preferences from the config
+        algorithm = self.config.get('System', 'algorithm', fallback='gob')
+        log_fps = self.config.getboolean('DataCollection', 'log_fps', fallback=False)
         if self.enable_controller:
+            # Update detection and sampling state from the controller
             self.disable_detection = not self.detection_state.value
             self.sample_images = self.sample_state.value
 
-        # track FPS and framecount
+        # Track FPS and frame count
         frame_count = 0
 
         if log_fps:
             fps = FPS().start()
 
         try:
+            # Initialize the appropriate weed detection algorithm
             if algorithm == 'gog':
                 from utils.greenongreen import GreenOnGreen
-                model_path = self.config.get('GreenOnGreen', 'model_path')
-                confidence = self.config.getfloat('GreenOnGreen', 'confidence')
+                model_path = self.config.get('GreenOnGreen', 'model_path', fallback='models/gog_model.tflite')
+                confidence = self.config.getfloat('GreenOnGreen', 'confidence', fallback=0.5)
 
                 weed_detector = GreenOnGreen(model_path=model_path)
 
             else:
-                min_detection_area = self.config.getint('GreenOnBrown', 'min_detection_area')
-                invert_hue = self.config.getboolean('GreenOnBrown', 'invert_hue')
+                # Parameters for GreenOnBrown algorithm
+                min_detection_area = self.config.getint('GreenOnBrown', 'min_detection_area', fallback=500)
+                invert_hue = self.config.getboolean('GreenOnBrown', 'invert_hue', fallback=False)
 
                 weed_detector = GreenOnBrown(algorithm=algorithm)
 
@@ -241,26 +247,31 @@ class Owl:
             self.stop()
 
         if self.show_display:
+            # Setup relay visualization if display is enabled
             self.relay_vis = self.relay_controller.relay_vis
             self.relay_vis.setup()
             self.relay_controller.vis = True
 
         try:
-            actuation_duration = self.config.getfloat('System', 'actuation_duration')
-            delay = self.config.getfloat('System', 'delay')
+            actuation_duration = self.config.getfloat('System', 'actuation_duration', fallback=0.5)
+            delay = self.config.getfloat('System', 'delay', fallback=0.1)
 
             while True:
                 if self.enable_controller:
+                    # Update detection and sampling state from the controller
                     self.disable_detection = not self.detection_state.value
                     self.sample_images = self.sample_state.value
 
+                # Read the next frame from the camera or video
                 frame = self.cam.read()
 
                 if self.focus:
+                    # Convert to grayscale and calculate blurriness if focus is enabled
                     grey = cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2GRAY)
                     blurriness = fft_blur(grey, size=30)
 
                 if frame is None:
+                    # Stop if no frame is returned
                     if log_fps:
                         fps.stop()
                         print(f"[INFO] Stopped. Approximate FPS: {fps.fps():.2f}")
@@ -271,7 +282,7 @@ class Owl:
                         self.stop()
                         break
 
-                # retrieve the trackbar positions for thresholds
+                # Retrieve the trackbar positions for thresholds
                 if self.show_display:
                     self.exgMin = cv2.getTrackbarPos("ExG-Min", self.window_name)
                     self.exgMax = cv2.getTrackbarPos("ExG-Max", self.window_name)
@@ -283,10 +294,10 @@ class Owl:
                     self.brightnessMax = cv2.getTrackbarPos("Bright-Max", self.window_name)
 
                 else:
-                    # this leaves it open to adding dials for sensitivity. Static at the moment, but could be dynamic
-                    self.update(exgMin=self.exgMin, exgMax=self.exgMax)  # add in update values here
+                    # Update threshold values if display is not enabled
+                    self.update(exgMin=self.exgMin, exgMax=self.exgMax)
 
-                # pass image, thresholds to green_on_brown function
+                # Perform weed detection if detection is enabled
                 if not self.disable_detection:
                     if algorithm == 'gog':
                         cnts, boxes, weed_centres, image_out = weed_detector.inference(frame,
@@ -312,14 +323,16 @@ class Owl:
                     lane_coords_int = {k: int(v) for k, v in self.lane_coords.items()}
 
                     if len(weed_centres) > 0 and self.enable_controller:
+                        # Trigger the detection indicator
                         self.basic_controller.weed_detect_indicator()
 
-                    # loop over the weed centres
+                    # Loop over the detected weed centres
                     for centre in weed_centres:
                         if centre[1] > self.yAct:
                             actuation_time = time.time()
                             centre_x = centre[0]
 
+                            # Determine the appropriate lane and activate the corresponding relay
                             for i in range(self.relay_num):
                                 lane_start = lane_coords_int[i]
                                 lane_end = lane_start + self.lane_width
@@ -330,9 +343,9 @@ class Owl:
                                                                   duration=actuation_duration)
 
                 ##### IMAGE SAMPLER #####
-                # record sample images if required of weeds detected. sampleFreq specifies how often
+                # Record sample images if required
                 if self.sample_images:
-                    # only record every sampleFreq number of frames. If sample_frequency = 60, this will activate every 60th frame
+                    # Record every sample_frequency frames
                     if frame_count % self.sample_frequency == 0:
                         self.indicators.image_write_indicator()
 
@@ -346,6 +359,7 @@ class Owl:
                             self.image_recorder.add_frame(frame=frame, frame_id=frame_count, boxes=None, centres=None)
 
                     if self.indicators.DRIVE_FULL:
+                        # Stop sampling if storage is full
                         self.sample_images = False
                         self.image_recorder.stop()
 
@@ -356,10 +370,11 @@ class Owl:
                     self.logger.log_line(f"[INFO] Approximate FPS: {fps.fps():.2f}", verbose=True)
                     fps = FPS().start()
 
-                # update the framerate counter
+                # Update the framerate counter
                 if log_fps:
                     fps.update()
 
+                # Display the output if enabled
                 if self.show_display:
                     if self.disable_detection:
                         image_out = frame.copy()
@@ -391,6 +406,7 @@ class Owl:
                     break
 
         except KeyboardInterrupt:
+            # Handle keyboard interrupt gracefully
             if log_fps:
                 fps.stop()
                 self.logger.log_line(f"[INFO] Approximate FPS: {fps.fps():.2f}", verbose=True)
@@ -400,14 +416,17 @@ class Owl:
             self.stop()
 
         except Exception as e:
+            # Handle other exceptions
             self.logger.log_line(f"[CRITICAL ERROR] STOPPED: {e}", verbose=True)
             self.stop()
 
     def stop(self):
+        # Stop all relay actions and clean up resources
         self.relay_controller.running = False
         self.relay_controller.relay.all_off()
-        self.relay_controller.relay.beep(duration=0.1)
-        self.relay_controller.relay.beep(duration=0.1)
+        if self.config.getboolean('System', 'enable_audible_errors', fallback=True):
+            self.relay_controller.relay.beep(duration=0.1)
+            self.relay_controller.relay.beep(duration=0.1)
 
         self.cam.stop()
 
@@ -425,14 +444,16 @@ class Owl:
         sys.exit()
 
     def update(self, exgMin=30, exgMax=180):
+        # Update the ExG threshold values
         self.exgMin = exgMin
         self.exgMax = exgMax
 
     def update_delay(self, delay=0):
-        # if GPS added, could use it here to return a delay variable based on speed.
+        # Update delay value (could be linked to GPS speed in the future)
         return delay
 
     def save_parameters(self):
+        # Save current parameters to a new configuration file with a timestamp
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         new_config_filename = f"{timestamp}_{self._config_path.name}"
         new_config_path = self._config_path.parent / new_config_filename
@@ -457,7 +478,7 @@ class Owl:
         print(f"[INFO] Configuration saved to {new_config_path}")
 
     def _handle_exceptions(self, e, algorithm):
-        # handle exceptions cleanly
+        # Handle exceptions cleanly and log error details
         error_type = type(e).__name__
         error_message = str(e)
 
@@ -479,14 +500,14 @@ class Owl:
         full_message = f"\n[{error_type}] while starting algorithm: {algorithm}.\nError message: {error_message}{detailed_message}"
 
         self.logger.log_line(full_message, verbose=True)
-        self.relay_controller.relay.beep(duration=0.25, repeats=4)
+        if self.config.getboolean('System', 'enable_audible_errors', fallback=True):
+            self.relay_controller.relay.beep(duration=0.25, repeats=4)
         sys.exit()
 
 
-# business end of things
+# Entry point of the script
 if __name__ == "__main__":
-    # these command line arguments enable people to operate/change some settings from the command line instead of
-    # opening up the OWL code each time.
+    # Command line arguments for changing settings
     ap = argparse.ArgumentParser()
     ap.add_argument('--show-display', action='store_true', default=False, help='show display windows')
     ap.add_argument('--focus', action='store_true', default=False, help='add FFT blur to output frame')
@@ -494,11 +515,11 @@ if __name__ == "__main__":
 
     args = ap.parse_args()
 
-    # this is where you can change the config file default
+    # Initialize the Owl instance with the provided arguments
     owl = Owl(config_file='config/DAY_SENSITIVITY_2.ini',
               show_display=args.show_display,
               focus=args.focus,
               input_file_or_directory=args.input)
 
-    # start the targeting!
+    # Start the detection process
     owl.hoot()
