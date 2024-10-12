@@ -5,6 +5,7 @@ from utils.blur_algorithms import fft_blur
 from utils.greenonbrown import GreenOnBrown
 from utils.relay_control import RelayController, StatusIndicator
 from utils.frame_reader import FrameReader
+from utils.canbus import MultiNodeCanBusController
 
 from multiprocessing import Value, Process
 from configparser import ConfigParser
@@ -207,6 +208,38 @@ class Owl:
             laneX = int(i * self.lane_width)
             self.lane_coords[i] = laneX
 
+        # Set up CAN bus integration
+        self.enable_can_bus = self.config.getboolean('CANBus', 'enable_can_bus', fallback=False)
+        if self.enable_can_bus:
+            self.can_bus_controller = MultiNodeCanBusController(controller_id=1, 
+                                                                can_interface=self.config.get('CANBus', 'can_interface', fallback='can0'),
+                                                                bitrate=self.config.getint('CANBus', 'bitrate', fallback=500000))
+            self.can_bus_controller.start()
+
+            # Load available configuration files
+            self.available_configs = [f'config/config_{i}.ini' for i in range(1, 21)]
+
+            # Start receiving CAN messages to handle configuration changes
+            self.can_bus_controller.can_bus.receive_messages(callback=self.handle_can_message)
+
+    def handle_can_message(self, message):
+        # Handle CAN message to change configuration
+        try:
+            config_index = int(message.data[0])
+            self.change_config(config_index)
+        except (ValueError, IndexError) as e:
+            self.logger.log_line(f"[ERROR] Failed to change configuration from CAN message: {e}", verbose=True)
+
+    def change_config(self, config_index):
+        # Change the configuration file
+        if 1 <= config_index <= 20:
+            new_config_file = self.available_configs[config_index - 1]
+            self._config_path = Path(__file__).parent / new_config_file
+            self.config.read(self._config_path)
+            self.logger.log_line(f"[INFO] Configuration changed to {new_config_file}", verbose=True)
+        else:
+            self.logger.log_line(f"[ERROR] Invalid configuration index: {config_index}. Must be between 1 and 20.", verbose=True)
+
     def hoot(self):
         # Read algorithm and logging preferences from the config
         algorithm = self.config.get('System', 'algorithm', fallback='gob')
@@ -382,7 +415,7 @@ class Owl:
                     cv2.putText(image_out, f'OWL-gorithm: {algorithm}', (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
                                 (80, 80, 255), 1)
                     cv2.putText(image_out, f'Press "S" to save {algorithm} thresholds to file.',
-                                (20, int(image_out.shape[1 ] *0.72)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 255), 1)
+                                (20, int(image_out.shape[1] * 0.72)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 255), 1)
                     if self.focus:
                         cv2.putText(image_out, f'Blurriness: {blurriness:.2f}', (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 1,
                                     (80, 80, 255), 1)
@@ -440,6 +473,9 @@ class Owl:
 
         if self.show_display:
             cv2.destroyAllWindows()
+
+        if self.enable_can_bus:
+            self.can_bus_controller.stop()
 
         sys.exit()
 
@@ -512,6 +548,7 @@ if __name__ == "__main__":
     ap.add_argument('--show-display', action='store_true', default=False, help='show display windows')
     ap.add_argument('--focus', action='store_true', default=False, help='add FFT blur to output frame')
     ap.add_argument('--input', type=str, default=None, help='path to image directory, single image or video file')
+    ap.add_argument('--config-index', type=int, default=None, help='index of configuration file to use (1-20)')
 
     args = ap.parse_args()
 
@@ -520,6 +557,10 @@ if __name__ == "__main__":
               show_display=args.show_display,
               focus=args.focus,
               input_file_or_directory=args.input)
+
+    # Change configuration if specified
+    if args.config_index is not None:
+        owl.change_config(args.config_index)
 
     # Start the detection process
     owl.hoot()
